@@ -21,10 +21,10 @@ static volatile int interrupted;
 
 static void sigterm_catch(int signal) {
     if (signal == SIGTERM) {
-        lwsl_user("received termination\n");
+        lwsl_notice("received termination\n");
         interrupted = 1;
     } else if (signal == SIGINT) {
-        lwsl_user("received interrupt\n");
+        lwsl_notice("received interrupt\n");
         interrupted = 1;
     } else if (signal == SIGUSR1) {
         lwsl_user("received SIGUSR1, change loglevel to debug\n");
@@ -121,11 +121,6 @@ static int init_connect_info(struct lws_context_creation_info *info, struct lws_
     if ((end = strstr(options, "mux=")) != NULL) {
         end += 4;
         mux = (int) strtol(end, NULL, 10);
-    }
-
-    // loglevel
-    if (strstr(options, "loglevel=debug") != NULL) {
-        lws_set_log_level(LLL_ERR | LLL_WARN | LLL_USER | LLL_NOTICE, NULL);
     }
 
     // strip
@@ -409,7 +404,12 @@ int main() {
             { NULL, NULL, 0, 0, 0, NULL, 0 }
     };
 
-    lws_set_log_level(LLL_ERR | LLL_WARN | LLL_USER, NULL);
+    // loglevel
+    if (strstr(getenv("SS_PLUGIN_OPTIONS"), "loglevel=debug") != NULL) {
+        lws_set_log_level(LLL_ERR | LLL_WARN | LLL_USER | LLL_NOTICE, NULL);
+    } else {
+        lws_set_log_level(LLL_ERR | LLL_WARN | LLL_USER, NULL);
+    }
 
     memset(&info, 0, sizeof info);
     info.port = CONTEXT_PORT_NO_LISTEN;
