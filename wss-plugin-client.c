@@ -6,7 +6,7 @@
 #include "libwebsockets.h"
 
 #ifndef WSS_PLUGIN_VERSION
-#define WSS_PLUGIN_VERSION "0.1.3"
+#define WSS_PLUGIN_VERSION "0.1.4"
 #endif
 
 #define USER_AGENT_MAX_LENGTH 64
