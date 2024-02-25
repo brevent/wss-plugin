@@ -6,7 +6,7 @@
 #include "libwebsockets.h"
 
 #ifndef WSS_PLUGIN_VERSION
-#define WSS_PLUGIN_VERSION "0.1.4"
+#define WSS_PLUGIN_VERSION "0.1.5"
 #endif
 
 #define USER_AGENT_MAX_LENGTH 64
@@ -140,15 +140,18 @@ static int init_connect_info(struct lws_context_creation_info *info, struct lws_
     if (mux) {
         lwsl_warn("mux %d is unsupported", mux);
     }
-#define USR_LOCAL "/usr/local"
+#ifndef CERT_PEM
+#ifdef __APPLE__
+#define CERT_PEM "/usr/local/etc/ssl/cert.pem"
+#else
 #define CERT_PEM "/etc/ssl/cert.pem"
+#endif
+#endif
     if (connect_info->ssl_connection == LCCSCF_USE_SSL) {
         if (cert != NULL && access(cert, R_OK) == 0) {
             info->client_ssl_ca_filepath = cert;
         } else if (access(CERT_PEM, R_OK) == 0) {
             info->client_ssl_ca_filepath = CERT_PEM;
-        } else if (access(USR_LOCAL CERT_PEM, R_OK) == 0) {
-            info->client_ssl_ca_filepath = USR_LOCAL CERT_PEM;
         }
     }
     return 0;
@@ -397,6 +400,7 @@ static int callback_proxy(struct lws *wsi, enum lws_callback_reasons reason, ATT
 }
 
 int main() {
+    const char *plugin_options;
     struct lws_context *context;
     struct lws_context_creation_info info;
     const struct lws_protocols protocols[] = {
@@ -407,7 +411,8 @@ int main() {
     };
 
     // loglevel
-    if (strstr(getenv("SS_PLUGIN_OPTIONS"), "loglevel=debug") != NULL) {
+    plugin_options = getenv("SS_PLUGIN_OPTIONS");
+    if (plugin_options != NULL && strstr(plugin_options, "loglevel=debug") != NULL) {
         lws_set_log_level(LLL_ERR | LLL_WARN | LLL_USER | LLL_NOTICE, NULL);
     } else {
         lws_set_log_level(LLL_ERR | LLL_WARN | LLL_USER, NULL);
