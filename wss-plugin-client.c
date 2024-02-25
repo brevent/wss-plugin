@@ -287,7 +287,7 @@ static int callback_proxy(struct lws *wsi, enum lws_callback_reasons reason, ATT
             } else {
                 // FIXME: close local wsi or reconnect
                 lwsl_warn("LWS_CALLBACK_CLIENT_CLOSED, wsi: %p, would close local wsi: %p\n", wsi, proxy->local.wsi);
-                lws_close_free_wsi(proxy->local.wsi, LWS_CLOSE_STATUS_NOSTATUS, "remote closed");
+                lws_callback_on_writable(proxy->local.wsi);
             }
             break;
         }
@@ -304,7 +304,6 @@ static int callback_proxy(struct lws *wsi, enum lws_callback_reasons reason, ATT
             if (proxy->local.state == STATE_ESTABLISHED) {
                 lwsl_warn("LWS_CALLBACK_CLIENT_CONNECTION_ERROR, wsi: %p, would close local wsi: %p, reason: %s\n",
                           wsi, proxy->local.wsi, in ? (char *) in : "(null)");
-                lws_close_free_wsi(proxy->local.wsi, LWS_CLOSE_STATUS_NOSTATUS, "remote error");
             } else {
                 lwsl_notice("LWS_CALLBACK_CLIENT_CONNECTION_ERROR, wsi: %p\n", wsi);
             }
@@ -407,7 +406,7 @@ int main() {
             {
                     "proxy", callback_proxy, sizeof(struct wsi_proxy), BUF_SIZE, 0, NULL, 0
             },
-            LWS_PROTOCOL_LIST_TERM
+            { NULL, NULL, 0, 0, 0, NULL, 0 }
     };
 
     lws_set_log_level(LLL_ERR | LLL_WARN | LLL_USER, NULL);

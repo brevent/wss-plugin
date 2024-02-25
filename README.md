@@ -9,10 +9,8 @@ Refer [libwebsockets](https://github.com/warmcat/libwebsockets).
 ### build
 
 ```bash
-mdkir build
-cd build
-cmake ..
-make
+cmake -B build
+cmake --build build
 ```
 
 ## Usage
