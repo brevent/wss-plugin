@@ -441,6 +441,7 @@ int main() {
     if (init_local_info(&info)) {
         return EXIT_FAILURE;
     }
+    // since lws 3.2.0
     info.options |= LWS_SERVER_OPTION_ADOPT_APPLY_LISTEN_ACCEPT_CONFIG;
     info.listen_accept_role = "raw-skt";
     if (!lws_create_vhost(context, &info)) {
