@@ -179,10 +179,7 @@ static int init_local_info(struct lws_context_creation_info *info) {
     return 0;
 }
 
-#ifndef ATTR_UNUSED
-#define ATTR_UNUSED __attribute__((unused))
-#endif
-static int callback_proxy(struct lws *wsi, enum lws_callback_reasons reason, ATTR_UNUSED void *user, void *in, size_t len) {
+static int callback_proxy(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len) {
     switch (reason) {
         // remote
         case LWS_CALLBACK_CLIENT_APPEND_HANDSHAKE_HEADER: {
@@ -403,10 +400,8 @@ int main() {
     struct lws_context *context;
     struct lws_context_creation_info info;
     const struct lws_protocols protocols[] = {
-            {
-                    "proxy", callback_proxy, sizeof(struct wsi_proxy), BUF_SIZE, 0, NULL, 0
-            },
-            { NULL, NULL, 0, 0, 0, NULL, 0 }
+            {"proxy", callback_proxy, sizeof(struct wsi_proxy), BUF_SIZE, 0, NULL, 0},
+            {NULL,    NULL,           0,                        0,        0, NULL, 0}
     };
 
     // loglevel
@@ -442,7 +437,8 @@ int main() {
         return 1;
     }
 
-    user_agent_length = snprintf(user_agent, USER_AGENT_MAX_LENGTH, "wss-plugin/%s lws/%s", WSS_PLUGIN_VERSION, lws_get_library_version());
+    user_agent_length = lws_snprintf(user_agent, USER_AGENT_MAX_LENGTH,
+                                     "wss-plugin/%s lws/%s", WSS_PLUGIN_VERSION, lws_get_library_version());
 
     if (init_local_info(&info)) {
         return EXIT_FAILURE;
