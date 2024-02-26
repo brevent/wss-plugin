@@ -198,11 +198,11 @@ static int callback_proxy(struct lws *wsi, enum lws_callback_reasons reason, ATT
             struct wsi_proxy *proxy = lws_wsi_user(wsi);
             if (proxy == NULL) {
                 lwsl_notice("LWS_CALLBACK_CLIENT_ESTABLISHED, local wsi was closed, wsi: %p", wsi);
-                break;
+                return -1;
             }
             if (proxy->remote.wsi != wsi || proxy->local.wsi == NULL) {
                 lwsl_err("LWS_CALLBACK_CLIENT_ESTABLISHED, no proxy in wsi: %p", wsi);
-                break;
+                return -1;
             }
             lwsl_notice("LWS_CALLBACK_CLIENT_ESTABLISHED, wsi: %p", wsi);
             proxy->remote.state = STATE_ESTABLISHED;
@@ -213,11 +213,11 @@ static int callback_proxy(struct lws *wsi, enum lws_callback_reasons reason, ATT
             struct wsi_proxy *proxy = lws_wsi_user(wsi);
             if (proxy == NULL) {
                 lwsl_notice("LWS_CALLBACK_CLIENT_RECEIVE, local wsi was closed, wsi: %p", wsi);
-                break;
+                return -1;
             }
             if (proxy->remote.wsi != wsi || proxy->local.wsi == NULL) {
                 lwsl_err("LWS_CALLBACK_CLIENT_RECEIVE, no proxy in wsi: %p", wsi);
-                break;
+                return -1;
             }
             if (proxy->remote.len && proxy->remote.len + len > BUF_SIZE) {
                 lwsl_err("LWS_CALLBACK_CLIENT_RECEIVE, remote buf is full in wsi: %p", wsi);
@@ -239,11 +239,11 @@ static int callback_proxy(struct lws *wsi, enum lws_callback_reasons reason, ATT
             struct wsi_proxy *proxy = lws_wsi_user(wsi);
             if (proxy == NULL) {
                 lwsl_notice("LWS_CALLBACK_CLIENT_WRITEABLE, local wsi was closed, wsi: %p", wsi);
-                break;
+                return -1;
             }
             if (proxy->remote.wsi != wsi || proxy->local.wsi == NULL) {
                 lwsl_err("LWS_CALLBACK_CLIENT_WRITEABLE, no proxy in wsi: %p", wsi);
-                break;
+                return -1;
             }
             lwsl_notice("LWS_CALLBACK_CLIENT_WRITEABLE, wsi: %p", wsi);
             if (proxy->local.len > 0) {
@@ -263,15 +263,15 @@ static int callback_proxy(struct lws *wsi, enum lws_callback_reasons reason, ATT
             struct wsi_proxy *proxy = lws_wsi_user(wsi);
             if (proxy == NULL) {
                 lwsl_notice("LWS_CALLBACK_CLIENT_CLOSED, local wsi was closed, wsi: %p", wsi);
-                break;
+                return -1;
             }
             if (proxy->remote.wsi != wsi || proxy->local.wsi == NULL) {
                 lwsl_err("LWS_CALLBACK_CLIENT_CLOSED, no proxy in wsi: %p", wsi);
-                break;
+                return -1;
             }
             if (proxy->remote.state == STATE_CLOSED) {
                 lwsl_err("LWS_CALLBACK_CLIENT_CLOSED, was closed, wsi: %p", wsi);
-                break;
+                return -1;
             }
             proxy->remote.state = STATE_CLOSED;
             if (proxy->local.state != STATE_ESTABLISHED && proxy->remote.len > 0) {
@@ -281,31 +281,30 @@ static int callback_proxy(struct lws *wsi, enum lws_callback_reasons reason, ATT
             }
             if (proxy->remote.len > 0) {
                 lwsl_notice("LWS_CALLBACK_CLIENT_CLOSED, wsi: %p", wsi);
-                lws_callback_on_writable(proxy->local.wsi);
             } else {
                 lwsl_warn("LWS_CALLBACK_CLIENT_CLOSED, wsi: %p, would close local wsi: %p", wsi, proxy->local.wsi);
-                lws_callback_on_writable(proxy->local.wsi);
             }
+            lws_callback_on_writable(proxy->local.wsi);
             break;
         }
         case LWS_CALLBACK_CLIENT_CONNECTION_ERROR: {
             struct wsi_proxy *proxy = lws_wsi_user(wsi);
             if (proxy == NULL) {
                 lwsl_notice("LWS_CALLBACK_CLIENT_CONNECTION_ERROR, local wsi was closed, wsi: %p", wsi);
-                break;
+                return -1;
             }
             if (proxy->remote.wsi != wsi || proxy->local.wsi == NULL) {
                 lwsl_err("LWS_CALLBACK_CLIENT_CONNECTION_ERROR, no proxy in wsi: %p", wsi);
-                break;
+                return -1;
             }
             proxy->remote.state = STATE_CLOSED;
             if (proxy->local.state == STATE_ESTABLISHED) {
                 lwsl_warn("LWS_CALLBACK_CLIENT_CONNECTION_ERROR, wsi: %p, would close local wsi: %p, reason: %s",
                           wsi, proxy->local.wsi, in ? (char *) in : "(null)");
-                lws_callback_on_writable(proxy->local.wsi);
             } else {
                 lwsl_notice("LWS_CALLBACK_CLIENT_CONNECTION_ERROR, wsi: %p", wsi);
             }
+            lws_callback_on_writable(proxy->local.wsi);
             break;
         }
             // local
@@ -335,7 +334,7 @@ static int callback_proxy(struct lws *wsi, enum lws_callback_reasons reason, ATT
             struct wsi_proxy *proxy = lws_wsi_user(wsi);
             if (proxy == NULL || proxy->local.wsi != wsi || proxy->remote.wsi == NULL) {
                 lwsl_err("LWS_CALLBACK_RAW_RX, no proxy in wsi: %p", wsi);
-                break;
+                return -1;
             }
             if (proxy->local.len && proxy->local.len + len > BUF_SIZE) {
                 lwsl_err("LWS_CALLBACK_RAW_RX, local buf is full in wsi: %p", wsi);
@@ -353,7 +352,7 @@ static int callback_proxy(struct lws *wsi, enum lws_callback_reasons reason, ATT
             struct wsi_proxy *proxy = lws_wsi_user(wsi);
             if (proxy == NULL || proxy->local.wsi != wsi || proxy->remote.wsi == NULL) {
                 lwsl_err("LWS_CALLBACK_RAW_WRITEABLE, no proxy in wsi: %p", wsi);
-                break;
+                return -1;
             }
             if (proxy->remote.len > 0) {
                 int n = lws_write(wsi, (unsigned char *) proxy->remote.buf, proxy->remote.len, LWS_WRITE_RAW);
@@ -375,7 +374,7 @@ static int callback_proxy(struct lws *wsi, enum lws_callback_reasons reason, ATT
             struct wsi_proxy *proxy = lws_wsi_user(wsi);
             if (proxy == NULL || proxy->local.wsi != wsi || proxy->remote.wsi == NULL) {
                 lwsl_err("LWS_CALLBACK_RAW_CLOSE, no proxy in wsi: %p", wsi);
-                break;
+                return -1;
             }
             if (proxy->local.state == STATE_CLOSED) {
                 lwsl_warn("LWS_CALLBACK_RAW_CLOSE, closed, wsi: %p, proxy local: %p, proxy remote: %p, remain: %d",
@@ -384,9 +383,9 @@ static int callback_proxy(struct lws *wsi, enum lws_callback_reasons reason, ATT
             }
             proxy->local.state = STATE_CLOSED;
             if (proxy->remote.state == STATE_ESTABLISHED) {
-                lws_set_wsi_user(proxy->remote.wsi, NULL);
                 lwsl_notice("LWS_CALLBACK_RAW_CLOSE, would close remote wsi: %p", wsi);
-                lws_close_reason(proxy->remote.wsi, LWS_CLOSE_STATUS_GOINGAWAY, (unsigned char *) "seeya", 5);
+                lws_set_wsi_user(proxy->remote.wsi, NULL);
+                lws_callback_on_writable(proxy->remote.wsi);
             }
             lwsl_user("LWS_CALLBACK_RAW_CLOSE, local wsi: %p, remote wsi: %p, count: %d",
                       wsi, proxy->remote.wsi, --count);
