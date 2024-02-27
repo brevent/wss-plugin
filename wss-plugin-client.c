@@ -1,4 +1,3 @@
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -9,13 +8,7 @@
 #define WSS_PLUGIN_VERSION "0.1.5"
 #endif
 
-#define USER_AGENT_MAX_LENGTH 64
-static char user_agent[USER_AGENT_MAX_LENGTH];
-static int user_agent_length;
-static struct lws_client_connect_info cc_info;
-#define BUF_SIZE 4096
-
-static volatile int count = 0;
+#define BUF_SIZE 2048
 
 static volatile int interrupted;
 
@@ -35,29 +28,62 @@ static void sigterm_catch(int signal) {
     }
 }
 
-struct wsi_data_wss {
-    int state;
-    struct lws *wsi;
-    size_t len;
-    char pre[LWS_PRE]; /** reserved for wss frame **/
-    char buf[BUF_SIZE];
-};
-
-struct wsi_data {
-    int state;
-    struct lws *wsi;
-    size_t len;
-    char buf[BUF_SIZE];
-};
-
 enum {
     STATE_ESTABLISHED = 1,
     STATE_CLOSED,
 };
 
-struct wsi_proxy {
-    struct wsi_data_wss local;
-    struct wsi_data remote;
+struct wss_frame {
+    union {
+        struct {
+            uint16_t unused;
+            uint8_t fin: 1;
+            uint8_t rsv: 3;
+            uint8_t opcode: 4;
+            uint8_t mask: 1;
+            uint8_t length: 7;
+        } frame7;
+        struct {
+            uint8_t fin: 1;
+            uint8_t rsv: 3;
+            uint8_t opcode: 4;
+            uint8_t mask: 1;
+            uint8_t length: 7;
+            uint16_t extend_length;
+        } frame23;
+        struct {
+            uint16_t unused;
+            uint8_t fop;
+            uint8_t mlen;
+        } f2;
+        struct {
+            uint8_t fop;
+            uint8_t mlen;
+            uint16_t elen;
+        } f4;
+    } frame;
+    uint32_t mask;
+};
+
+struct wss_tunnel {
+    uint8_t wss_channel: 4;
+    uint8_t raw_channel: 4;
+    uint8_t wss_state: 4;
+    uint8_t raw_state: 4;
+    uint16_t raw_port; // 2
+    uint16_t raw_len; // 2
+    uint16_t wss_len; // 2
+    struct wss_frame frame; // 8
+    unsigned char raw_rx[BUF_SIZE];
+    unsigned char wss_rx[BUF_SIZE];
+};
+
+#define USER_AGENT_MAX_LENGTH 64
+struct wss_context {
+    char user_agent[USER_AGENT_MAX_LENGTH];
+    int user_agent_length;
+    volatile int count;
+    struct lws_client_connect_info *cc_info;
 };
 
 static int init_connect_info(struct lws_context_creation_info *info, struct lws_client_connect_info *connect_info) {
@@ -179,213 +205,203 @@ static int init_local_info(struct lws_context_creation_info *info) {
     return 0;
 }
 
-static int callback_proxy(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len) {
+static int callback_wss_client(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len) {
     switch (reason) {
         // remote
         case LWS_CALLBACK_CLIENT_APPEND_HANDSHAKE_HEADER: {
             unsigned char **p = (unsigned char **) in;
             unsigned char *end = *p + len;
+            struct wss_context *wss_context = lws_context_user(lws_get_context(wsi));
             if (lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_USER_AGENT,
-                                             (unsigned char *) user_agent, user_agent_length, p, end)) {
+                                             (unsigned char *) wss_context->user_agent,
+                                             wss_context->user_agent_length, p, end)) {
                 lwsl_user("cannot add user_agent");
             }
             break;
         }
         case LWS_CALLBACK_CLIENT_ESTABLISHED: {
-            struct wsi_proxy *proxy = lws_wsi_user(wsi);
-            if (proxy == NULL) {
-                lwsl_notice("LWS_CALLBACK_CLIENT_ESTABLISHED, local wsi was closed, wsi: %p", wsi);
+            struct wss_tunnel *wss_tunnel = user;
+            if (wss_tunnel == NULL) {
+                lwsl_notice("[wss] connection established, local tunnel is closed");
                 return -1;
             }
-            if (proxy->remote.wsi != wsi || proxy->local.wsi == NULL) {
-                lwsl_err("LWS_CALLBACK_CLIENT_ESTABLISHED, no proxy in wsi: %p", wsi);
+            if (wss_tunnel->raw_state == STATE_CLOSED) {
+                lwsl_notice("[wss] connection established, however tunnel on peer %d is closed", wss_tunnel->raw_port);
                 return -1;
             }
-            lwsl_notice("LWS_CALLBACK_CLIENT_ESTABLISHED, wsi: %p", wsi);
-            proxy->remote.state = STATE_ESTABLISHED;
+            lwsl_notice("[wss] connected for peer %d", wss_tunnel->raw_port);
+            wss_tunnel->wss_state = STATE_ESTABLISHED;
             lws_callback_on_writable(wsi);
             break;
         }
         case LWS_CALLBACK_CLIENT_RECEIVE: {
-            struct wsi_proxy *proxy = lws_wsi_user(wsi);
-            if (proxy == NULL) {
-                lwsl_notice("LWS_CALLBACK_CLIENT_RECEIVE, local wsi was closed, wsi: %p", wsi);
+            struct wss_tunnel *wss_tunnel = user;
+            if (wss_tunnel == NULL) {
+                lwsl_notice("[wss] connection receive, local tunnel is closed");
                 return -1;
             }
-            if (proxy->remote.wsi != wsi || proxy->local.wsi == NULL) {
-                lwsl_err("LWS_CALLBACK_CLIENT_RECEIVE, no proxy in wsi: %p", wsi);
+            if (wss_tunnel->raw_state == STATE_CLOSED) {
+                lwsl_notice("[wss] connection receive, however tunnel on peer %d is closed", wss_tunnel->raw_port);
                 return -1;
             }
-            if (proxy->remote.len && proxy->remote.len + len > BUF_SIZE) {
-                lwsl_err("LWS_CALLBACK_CLIENT_RECEIVE, remote buf is full in wsi: %p", wsi);
+            if (len > BUF_SIZE) {
+                lwsl_err("[wss] buffer %d is less than %u for peer %d", BUF_SIZE, (uint16_t) len, wss_tunnel->raw_port);
                 return -1;
             }
-            lwsl_notice("LWS_CALLBACK_CLIENT_RECEIVE, wsi: %p", wsi);
-            memcpy(proxy->remote.buf + proxy->remote.len, in, len);
-            proxy->remote.len += len;
+            lwsl_notice("[wss] receive %u for peer %d", (uint16_t) len, wss_tunnel->raw_port);
+            memcpy(wss_tunnel->wss_rx, in, len);
+            wss_tunnel->wss_len = (uint16_t) len;
             // block wsi until local buf is empty
             lws_rx_flow_control(wsi, 0);
-            if (proxy->local.state == STATE_ESTABLISHED) {
-                lws_callback_on_writable(proxy->local.wsi);
-            }
+            lws_callback_on_writable(lws_get_opaque_parent_data(wsi));
             break;
         }
         case LWS_CALLBACK_CLIENT_RECEIVE_PONG:
             break;
         case LWS_CALLBACK_CLIENT_WRITEABLE: {
-            struct wsi_proxy *proxy = lws_wsi_user(wsi);
-            if (proxy == NULL) {
-                lwsl_notice("LWS_CALLBACK_CLIENT_WRITEABLE, local wsi was closed, wsi: %p", wsi);
+            struct wss_tunnel *wss_tunnel = user;
+            if (wss_tunnel == NULL) {
+                lwsl_notice("[wss] connection writable, local tunnel is closed");
                 return -1;
             }
-            if (proxy->remote.wsi != wsi || proxy->local.wsi == NULL) {
-                lwsl_err("LWS_CALLBACK_CLIENT_WRITEABLE, no proxy in wsi: %p", wsi);
+            if (wss_tunnel->raw_state == STATE_CLOSED) {
+                lwsl_notice("[wss] connection writable, however tunnel on peer %d is closed", wss_tunnel->raw_port);
                 return -1;
             }
-            lwsl_notice("LWS_CALLBACK_CLIENT_WRITEABLE, wsi: %p", wsi);
-            if (proxy->local.len > 0) {
-                int n = lws_write(wsi, (unsigned char *) proxy->local.buf, proxy->local.len, LWS_WRITE_BINARY);
-                if (n < 0) {
-                    lwsl_warn("write to remote wsi %p failed: %d", wsi, n);
+            if (wss_tunnel->raw_len > 0) {
+                uint8_t pre;
+                uint8_t fop;
+                wss_tunnel->frame.mask = 0;
+                fop = 0x82;
+                if (wss_tunnel->raw_len < 126) {
+                    wss_tunnel->frame.frame.f2.fop = fop;
+                    wss_tunnel->frame.frame.f2.mlen = (uint8_t) (1 << 0x7 | wss_tunnel->raw_len);
+                    pre = 6;
+                } else {
+                    wss_tunnel->frame.frame.f4.fop = fop;
+                    wss_tunnel->frame.frame.f4.mlen = 0xfe;
+                    wss_tunnel->frame.frame.f4.elen = ntohs(wss_tunnel->raw_len);
+                    pre = 8;
+                }
+               if (lws_write(wsi, wss_tunnel->raw_rx - pre , wss_tunnel->raw_len + pre, LWS_WRITE_RAW) < 0) {
+                    lwsl_notice("[wss] cannot write %u to remote for peer %d", wss_tunnel->raw_len,
+                                wss_tunnel->raw_port);
                     return -1;
                 }
-                proxy->local.len = 0;
+                lwsl_notice("[wss] write %u to remote for peer %d", wss_tunnel->raw_len, wss_tunnel->raw_port);
+                wss_tunnel->raw_len = 0;
             }
-            lws_rx_flow_control(proxy->local.wsi, 1);
+            lws_rx_flow_control(lws_get_opaque_parent_data(wsi), 1);
             break;
         }
         case LWS_CALLBACK_WS_PEER_INITIATED_CLOSE:
             return -1;
-        case LWS_CALLBACK_CLIENT_CLOSED: {
-            struct wsi_proxy *proxy = lws_wsi_user(wsi);
-            if (proxy == NULL) {
-                lwsl_notice("LWS_CALLBACK_CLIENT_CLOSED, local wsi was closed, wsi: %p", wsi);
-                return -1;
-            }
-            if (proxy->remote.wsi != wsi || proxy->local.wsi == NULL) {
-                lwsl_err("LWS_CALLBACK_CLIENT_CLOSED, no proxy in wsi: %p", wsi);
-                return -1;
-            }
-            if (proxy->remote.state == STATE_CLOSED) {
-                lwsl_err("LWS_CALLBACK_CLIENT_CLOSED, was closed, wsi: %p", wsi);
-                return -1;
-            }
-            proxy->remote.state = STATE_CLOSED;
-            if (proxy->local.state != STATE_ESTABLISHED && proxy->remote.len > 0) {
-                lwsl_warn("LWS_CALLBACK_CLIENT_CLOSED, wsi: %p, remain %d for local wsi: %p",
-                          wsi, (int) proxy->remote.len, proxy->local.wsi);
-                break;
-            }
-            if (proxy->remote.len > 0) {
-                lwsl_notice("LWS_CALLBACK_CLIENT_CLOSED, wsi: %p", wsi);
-            } else {
-                lwsl_warn("LWS_CALLBACK_CLIENT_CLOSED, wsi: %p, would close local wsi: %p", wsi, proxy->local.wsi);
-            }
-            lws_callback_on_writable(proxy->local.wsi);
-            break;
-        }
+        case LWS_CALLBACK_CLIENT_CLOSED:
         case LWS_CALLBACK_CLIENT_CONNECTION_ERROR: {
-            struct wsi_proxy *proxy = lws_wsi_user(wsi);
-            if (proxy == NULL) {
-                lwsl_notice("LWS_CALLBACK_CLIENT_CONNECTION_ERROR, local wsi was closed, wsi: %p", wsi);
+            struct wss_tunnel *wss_tunnel = user;
+            struct lws *raw_server;
+            raw_server = lws_get_opaque_parent_data(wsi);
+            if (wss_tunnel == NULL) {
+                lwsl_notice("[wss] connection closed, local tunnel is closed");
                 return -1;
             }
-            if (proxy->remote.wsi != wsi || proxy->local.wsi == NULL) {
-                lwsl_err("LWS_CALLBACK_CLIENT_CONNECTION_ERROR, no proxy in wsi: %p", wsi);
+            if (wss_tunnel->raw_state == STATE_CLOSED) {
+                lwsl_notice("[wss] connection closed, and tunnel on peer %d is closed", wss_tunnel->raw_port);
                 return -1;
             }
-            proxy->remote.state = STATE_CLOSED;
-            if (proxy->local.state == STATE_ESTABLISHED) {
-                lwsl_warn("LWS_CALLBACK_CLIENT_CONNECTION_ERROR, wsi: %p, would close local wsi: %p, reason: %s",
-                          wsi, proxy->local.wsi, in ? (char *) in : "(null)");
-            } else {
-                lwsl_notice("LWS_CALLBACK_CLIENT_CONNECTION_ERROR, wsi: %p", wsi);
+            wss_tunnel->wss_state = STATE_CLOSED;
+            lwsl_notice("[wss] connection closed, would close tunnel on peer %d, reason: %s",
+                        wss_tunnel->raw_port, in == NULL ? "(null)" : (char *) in);
+            if (raw_server != NULL) {
+                lws_callback_on_writable(raw_server);
             }
-            lws_callback_on_writable(proxy->local.wsi);
             break;
         }
-            // local
+        default:
+            break;
+    }
+
+    return 0;
+}
+
+static uint16_t get_port(struct lws *wsi) {
+    socklen_t len;
+    struct sockaddr_storage sin, *psin = &sin;
+    lws_sockfd_type sockfd = lws_get_socket_fd(wsi);
+    if (getpeername(sockfd, (struct sockaddr *) psin, &len) != -1) {
+        return (sin.ss_family == AF_INET6) ?
+               ntohs(((struct sockaddr_in6 *) psin)->sin6_port) :
+               ntohs(((struct sockaddr_in *) psin)->sin_port);
+    } else {
+        return 0;
+    }
+}
+
+static int callback_raw_server(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len) {
+    switch (reason) {
         case LWS_CALLBACK_RAW_ADOPT: {
             struct lws *wss;
-            struct wsi_proxy *proxy;
-            proxy = lws_wsi_user(wsi);
-            if (proxy == NULL) {
-                lwsl_warn("no user data in wsi: %p", wsi);
-                return -1;
-            }
-            memset(proxy, 0, sizeof(struct wsi_proxy));
-            cc_info.userdata = proxy;
-            wss = lws_client_connect_via_info(&cc_info);
+            struct wss_tunnel *wss_tunnel = user;
+            struct wss_context *wss_context;
+            wss_tunnel->raw_port = get_port(wsi);
+            wss_context = lws_context_user(lws_get_context(wsi));
+            wss_context->cc_info->userdata = wss_tunnel;
+            wss = lws_client_connect_via_info(wss_context->cc_info);
             if (wss == NULL) {
-                lwsl_warn("cannot connect to remote for wsi: %p", wsi);
+                lwsl_warn("[client] cannot connect to remote: %d", wss_tunnel->raw_port);
                 return -1;
             }
-            proxy->local.wsi = wsi;
-            proxy->remote.wsi = wss;
-            proxy->local.state = STATE_ESTABLISHED;
+            lws_set_opaque_parent_data(wsi, wss);
+            lws_set_opaque_parent_data(wss, wsi);
+            wss_tunnel->raw_state = STATE_ESTABLISHED;
             lws_callback_on_writable(wsi);
-            lwsl_user("LWS_CALLBACK_RAW_ADOPT, local wsi: %p, remote wsi: %p, count: %d", wsi, wss, ++count);
+            lwsl_user("[client] new connection from peer %d, count: %d", wss_tunnel->raw_port, ++wss_context->count);
             break;
         }
         case LWS_CALLBACK_RAW_RX: {
-            struct wsi_proxy *proxy = lws_wsi_user(wsi);
-            if (proxy == NULL || proxy->local.wsi != wsi || proxy->remote.wsi == NULL) {
-                lwsl_err("LWS_CALLBACK_RAW_RX, no proxy in wsi: %p", wsi);
-                return -1;
-            }
-            if (proxy->local.len && proxy->local.len + len > BUF_SIZE) {
-                lwsl_err("LWS_CALLBACK_RAW_RX, local buf is full in wsi: %p", wsi);
-                return -1;
-            }
-            lwsl_notice("LWS_CALLBACK_RAW_RX, local wsi: %p", wsi);
-            memcpy(proxy->local.buf + proxy->local.len, in, len);
-            proxy->local.len += len;
+            struct wss_tunnel *wss_tunnel = user;
+            lwsl_notice("[client] receive %u from peer %d", (uint16_t) len, wss_tunnel->raw_port);
+            memcpy(wss_tunnel->raw_rx, in, len);
+            wss_tunnel->raw_len = (uint16_t) len;
             // block wsi until buf is empty
             lws_rx_flow_control(wsi, 0);
-            lws_callback_on_writable(proxy->remote.wsi);
+            lws_callback_on_writable(lws_get_opaque_parent_data(wsi));
             break;
         }
         case LWS_CALLBACK_RAW_WRITEABLE: {
-            struct wsi_proxy *proxy = lws_wsi_user(wsi);
-            if (proxy == NULL || proxy->local.wsi != wsi || proxy->remote.wsi == NULL) {
-                lwsl_err("LWS_CALLBACK_RAW_WRITEABLE, no proxy in wsi: %p", wsi);
-                return -1;
-            }
-            if (proxy->remote.len > 0) {
-                int n = lws_write(wsi, (unsigned char *) proxy->remote.buf, proxy->remote.len, LWS_WRITE_RAW);
-                if (n < 0) {
-                    lwsl_warn("LWS_CALLBACK_RAW_WRITEABLE, write to local wsi failed for wsi: %p", wsi);
+            struct wss_tunnel *wss_tunnel = user;
+            if (wss_tunnel->wss_len > 0) {
+                if (lws_write(wsi, wss_tunnel->wss_rx, wss_tunnel->wss_len, LWS_WRITE_RAW) < 0) {
+                    lwsl_warn("[client] cannot write %u to peer %d", wss_tunnel->wss_len, wss_tunnel->raw_port);
                     return -1;
                 }
-                proxy->remote.len = 0;
+                lwsl_notice("[client] write %u to peer %d", wss_tunnel->wss_len, wss_tunnel->raw_port);
+                wss_tunnel->wss_len = 0;
             }
-            if (proxy->remote.state == STATE_CLOSED) {
-                lwsl_user("LWS_CALLBACK_RAW_WRITEABLE, would close local as remote wsi is closed");
+            if (wss_tunnel->wss_state == STATE_CLOSED) {
+                lwsl_notice("[client] remote connection is closed for client on %d", wss_tunnel->raw_port);
                 return -1;
             }
-            lwsl_notice("LWS_CALLBACK_RAW_WRITEABLE, local wsi: %p", wsi);
-            lws_rx_flow_control(proxy->remote.wsi, 1);
+            lws_rx_flow_control(lws_get_opaque_parent_data(wsi), 1);
             break;
         }
         case LWS_CALLBACK_RAW_CLOSE: {
-            struct wsi_proxy *proxy = lws_wsi_user(wsi);
-            if (proxy == NULL || proxy->local.wsi != wsi || proxy->remote.wsi == NULL) {
-                lwsl_err("LWS_CALLBACK_RAW_CLOSE, no proxy in wsi: %p", wsi);
-                return -1;
+            struct wss_tunnel *wss_tunnel = user;
+            struct lws *wss;
+            struct wss_context *wss_context = lws_context_user(lws_get_context(wsi));
+            --wss_context->count;
+            wss_tunnel->raw_state = STATE_CLOSED;
+            wss = lws_get_opaque_parent_data(wsi);
+            lws_set_wsi_user(wss, NULL);
+            lws_set_opaque_parent_data(wss, NULL);
+            if (wss_tunnel->wss_state != STATE_CLOSED) {
+                lwsl_user("[client] peer %d is closed, would close wss connection, count: %d",
+                          wss_tunnel->raw_port, wss_context->count);
+                lws_callback_on_writable(wss);
+            } else {
+                lwsl_user("[client] peer %d is closed, count: %d",
+                          wss_tunnel->raw_port, wss_context->count);
             }
-            if (proxy->local.state == STATE_CLOSED) {
-                lwsl_warn("LWS_CALLBACK_RAW_CLOSE, closed, wsi: %p, proxy local: %p, proxy remote: %p, remain: %d",
-                          wsi, proxy->local.wsi, proxy->remote.wsi, (int) proxy->remote.len);
-                break;
-            }
-            proxy->local.state = STATE_CLOSED;
-            if (proxy->remote.state == STATE_ESTABLISHED) {
-                lwsl_notice("LWS_CALLBACK_RAW_CLOSE, would close remote wsi: %p", wsi);
-                lws_set_wsi_user(proxy->remote.wsi, NULL);
-                lws_callback_on_writable(proxy->remote.wsi);
-            }
-            lwsl_user("LWS_CALLBACK_RAW_CLOSE, local wsi: %p, remote wsi: %p, count: %d",
-                      wsi, proxy->remote.wsi, --count);
             break;
         }
         default:
@@ -400,9 +416,12 @@ int main() {
     struct lws_context *context;
     struct lws_context_creation_info info;
     const struct lws_protocols protocols[] = {
-            {"proxy", callback_proxy, sizeof(struct wsi_proxy), BUF_SIZE, 0, NULL, 0},
-            {NULL,    NULL,           0,                        0,        0, NULL, 0}
+            {"raw-server", callback_raw_server, sizeof(struct wss_tunnel), 0, 0, NULL, 0},
+            {"wss-client", callback_wss_client, 0,                         0, 0, NULL, 0},
+            {NULL,         NULL,                0,                         0, 0, NULL, 0}
     };
+    struct wss_context context_data;
+    struct lws_client_connect_info cc_info;
 
     // loglevel
     plugin_options = getenv("SS_PLUGIN_OPTIONS");
@@ -412,46 +431,52 @@ int main() {
         lws_set_log_level(LLL_ERR | LLL_WARN | LLL_USER, NULL);
     }
 
-    memset(&info, 0, sizeof info);
+    memset(&context_data, 0, sizeof(context_data));
+    memset(&info, 0, sizeof(info));
     info.port = CONTEXT_PORT_NO_LISTEN;
     info.options = LWS_SERVER_OPTION_DO_SSL_GLOBAL_INIT | LWS_SERVER_OPTION_EXPLICIT_VHOSTS;
     info.gid = (gid_t) -1;
     info.uid = (uid_t) -1;
     info.protocols = protocols;
     info.vhost_name = "context";
+    info.user = &context_data;
     context = lws_create_context(&info);
     if (!context) {
         lwsl_err("lws_create_context failed");
         return 1;
     }
 
-    memset(&cc_info, 0, sizeof cc_info);
+    memset(&cc_info, 0, sizeof(cc_info));
+    context_data.cc_info = &cc_info;
     if (init_connect_info(&info, &cc_info)) {
         return EXIT_FAILURE;
     }
     info.vhost_name = cc_info.host;
     cc_info.context = context;
+    cc_info.local_protocol_name = "wss-client";
     cc_info.vhost = lws_create_vhost(context, &info);
     if (!cc_info.vhost) {
         lwsl_err("lws_create_vhost failed");
         return 1;
     }
 
-    user_agent_length = lws_snprintf(user_agent, USER_AGENT_MAX_LENGTH,
-                                     "wss-plugin/%s lws/%s", WSS_PLUGIN_VERSION, lws_get_library_version());
+    context_data.user_agent_length = lws_snprintf(context_data.user_agent, USER_AGENT_MAX_LENGTH,
+                                                  "wss-plugin/%s lws/%s", WSS_PLUGIN_VERSION,
+                                                  lws_get_library_version());
 
     if (init_local_info(&info)) {
         return EXIT_FAILURE;
     }
     // since lws 3.2.0
     info.options |= LWS_SERVER_OPTION_ADOPT_APPLY_LISTEN_ACCEPT_CONFIG;
+    info.listen_accept_protocol = "raw-server";
     info.listen_accept_role = "raw-skt";
     if (!lws_create_vhost(context, &info)) {
         lwsl_err("lws_create_vhost failed");
         return 1;
     }
 
-    lwsl_user("%s started", user_agent);
+    lwsl_user("%s started", context_data.user_agent);
     signal(SIGTERM, sigterm_catch);
     signal(SIGINT, sigterm_catch);
     signal(SIGUSR1, sigterm_catch);
