@@ -1,82 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#include <signal.h>
-#include "libwebsockets.h"
-
-#ifndef WSS_PLUGIN_VERSION
-#define WSS_PLUGIN_VERSION "0.1.5"
-#endif
-
-#define BUF_SIZE 2048
-
-static volatile int interrupted;
-
-static void sigterm_catch(int signal) {
-    if (signal == SIGTERM) {
-        lwsl_notice("received termination");
-        interrupted = 1;
-    } else if (signal == SIGINT) {
-        lwsl_notice("received interrupt");
-        interrupted = 1;
-    } else if (signal == SIGUSR1) {
-        lwsl_user("received SIGUSR1, change loglevel to debug");
-        lws_set_log_level(LLL_ERR | LLL_WARN | LLL_USER | LLL_NOTICE, NULL);
-    } else if (signal == SIGUSR2) {
-        lwsl_user("received SIGUSR1, change loglevel to info");
-        lws_set_log_level(LLL_ERR | LLL_WARN | LLL_USER, NULL);
-    }
-}
-
-enum {
-    STATE_ESTABLISHED = 1,
-    STATE_CLOSED,
-};
-
-struct wss_frame {
-    union {
-        struct {
-            uint16_t unused;
-            uint8_t fin: 1;
-            uint8_t rsv: 3;
-            uint8_t opcode: 4;
-            uint8_t mask: 1;
-            uint8_t length: 7;
-        } frame7;
-        struct {
-            uint8_t fin: 1;
-            uint8_t rsv: 3;
-            uint8_t opcode: 4;
-            uint8_t mask: 1;
-            uint8_t length: 7;
-            uint16_t extend_length;
-        } frame23;
-        struct {
-            uint16_t unused;
-            uint8_t fop;
-            uint8_t mlen;
-        } f2;
-        struct {
-            uint8_t fop;
-            uint8_t mlen;
-            uint16_t elen;
-        } f4;
-    } frame;
-    uint32_t mask;
-};
-
-struct wss_tunnel {
-    uint8_t wss_channel: 4;
-    uint8_t raw_channel: 4;
-    uint8_t wss_state: 4;
-    uint8_t raw_state: 4;
-    uint16_t raw_port; // 2
-    uint16_t raw_len; // 2
-    uint16_t wss_len; // 2
-    struct wss_frame frame; // 8
-    unsigned char raw_rx[BUF_SIZE];
-    unsigned char wss_rx[BUF_SIZE];
-};
+#include "common.h"
 
 #define USER_AGENT_MAX_LENGTH 64
 struct wss_context {
@@ -86,7 +11,7 @@ struct wss_context {
     struct lws_client_connect_info *cc_info;
 };
 
-static int init_connect_info(struct lws_context_creation_info *info, struct lws_client_connect_info *connect_info) {
+static int init_ws_info(struct lws_context_creation_info *info, struct lws_client_connect_info *connect_info) {
     char *end;
     int mux = 1;
     const char *cert;
@@ -160,7 +85,7 @@ static int init_connect_info(struct lws_context_creation_info *info, struct lws_
         *end = '\0';
     }
 
-    lwsl_user("will connect to %s:%d -> %s://%s%s", connect_info->address, connect_info->port,
+    lwsl_user("wss client %s:%d (%s://%s%s)", connect_info->address, connect_info->port,
               connect_info->ssl_connection == LCCSCF_USE_SSL ? "wss" : "ws",
               connect_info->host, connect_info->path);
     if (mux) {
@@ -183,7 +108,7 @@ static int init_connect_info(struct lws_context_creation_info *info, struct lws_
     return 0;
 }
 
-static int init_local_info(struct lws_context_creation_info *info) {
+static int init_raw_info(struct lws_context_creation_info *info) {
     char *end;
     const char *local_host = getenv("SS_LOCAL_HOST");
     const char *local_port = getenv("SS_LOCAL_PORT");
@@ -201,13 +126,28 @@ static int init_local_info(struct lws_context_creation_info *info) {
         return EINVAL;
     }
 
-    lwsl_user("listening %s:%d", info->iface, info->port);
+    lwsl_user("raw server %s:%d", info->iface, info->port);
     return 0;
+}
+
+static uint8_t prepare_wss_data(struct wss_tunnel *wss_tunnel) {
+    uint8_t fop;
+    fop = 0x82;
+    wss_tunnel->client.mask = 0;
+    if (wss_tunnel->raw_len < 126) {
+        wss_tunnel->client.f2.fop = fop;
+        wss_tunnel->client.f2.mlen = (uint8_t) (1 << 0x7 | wss_tunnel->raw_len);
+        return 6;
+    } else {
+        wss_tunnel->client.f4.fop = fop;
+        wss_tunnel->client.f4.mlen = 0xfe;
+        wss_tunnel->client.f4.elen = ntohs(wss_tunnel->raw_len);
+        return 8;
+    }
 }
 
 static int callback_wss_client(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len) {
     switch (reason) {
-        // remote
         case LWS_CALLBACK_CLIENT_APPEND_HANDSHAKE_HEADER: {
             unsigned char **p = (unsigned char **) in;
             unsigned char *end = *p + len;
@@ -222,14 +162,14 @@ static int callback_wss_client(struct lws *wsi, enum lws_callback_reasons reason
         case LWS_CALLBACK_CLIENT_ESTABLISHED: {
             struct wss_tunnel *wss_tunnel = user;
             if (wss_tunnel == NULL) {
-                lwsl_notice("[wss] connection established, local tunnel is closed");
+                lwsl_notice("[wss] established, however tunnel is null");
                 return -1;
             }
             if (wss_tunnel->raw_state == STATE_CLOSED) {
-                lwsl_notice("[wss] connection established, however tunnel on peer %d is closed", wss_tunnel->raw_port);
+                lwsl_notice("[wss] established for peer %d, however tunnel is closed", wss_tunnel->peer_port);
                 return -1;
             }
-            lwsl_notice("[wss] connected for peer %d", wss_tunnel->raw_port);
+            lwsl_notice("[wss] established for peer %d", wss_tunnel->peer_port);
             wss_tunnel->wss_state = STATE_ESTABLISHED;
             lws_callback_on_writable(wsi);
             break;
@@ -237,21 +177,23 @@ static int callback_wss_client(struct lws *wsi, enum lws_callback_reasons reason
         case LWS_CALLBACK_CLIENT_RECEIVE: {
             struct wss_tunnel *wss_tunnel = user;
             if (wss_tunnel == NULL) {
-                lwsl_notice("[wss] connection receive, local tunnel is closed");
+                lwsl_notice("[wss] received %u from wss, however tunnel is null", (uint16_t) len);
                 return -1;
             }
             if (wss_tunnel->raw_state == STATE_CLOSED) {
-                lwsl_notice("[wss] connection receive, however tunnel on peer %d is closed", wss_tunnel->raw_port);
+                lwsl_notice("[wss] received %u from wss for peer %d, however tunnel is closed",
+                            (uint16_t) len, wss_tunnel->peer_port);
                 return -1;
             }
-            if (len > BUF_SIZE) {
-                lwsl_err("[wss] buffer %d is less than %u for peer %d", BUF_SIZE, (uint16_t) len, wss_tunnel->raw_port);
+            if (len > RX_BUFFER_SIZE) {
+                lwsl_err("[wss] received %u from wss for peer %d, however buffer is only %d",
+                         (uint16_t) len, wss_tunnel->peer_port, RX_BUFFER_SIZE);
                 return -1;
             }
-            lwsl_notice("[wss] receive %u for peer %d", (uint16_t) len, wss_tunnel->raw_port);
+            lwsl_notice("[wss] received %u from wss for peer %d", (uint16_t) len, wss_tunnel->peer_port);
             memcpy(wss_tunnel->wss_rx, in, len);
             wss_tunnel->wss_len = (uint16_t) len;
-            // block wsi until local buf is empty
+            // block wsi until buf is empty
             lws_rx_flow_control(wsi, 0);
             lws_callback_on_writable(lws_get_opaque_parent_data(wsi));
             break;
@@ -261,34 +203,20 @@ static int callback_wss_client(struct lws *wsi, enum lws_callback_reasons reason
         case LWS_CALLBACK_CLIENT_WRITEABLE: {
             struct wss_tunnel *wss_tunnel = user;
             if (wss_tunnel == NULL) {
-                lwsl_notice("[wss] connection writable, local tunnel is closed");
                 return -1;
             }
             if (wss_tunnel->raw_state == STATE_CLOSED) {
-                lwsl_notice("[wss] connection writable, however tunnel on peer %d is closed", wss_tunnel->raw_port);
+                lwsl_notice("[wss] will send to wss for peer %d, however tunnel is closed", wss_tunnel->peer_port);
                 return -1;
             }
             if (wss_tunnel->raw_len > 0) {
-                uint8_t pre;
-                uint8_t fop;
-                wss_tunnel->frame.mask = 0;
-                fop = 0x82;
-                if (wss_tunnel->raw_len < 126) {
-                    wss_tunnel->frame.frame.f2.fop = fop;
-                    wss_tunnel->frame.frame.f2.mlen = (uint8_t) (1 << 0x7 | wss_tunnel->raw_len);
-                    pre = 6;
-                } else {
-                    wss_tunnel->frame.frame.f4.fop = fop;
-                    wss_tunnel->frame.frame.f4.mlen = 0xfe;
-                    wss_tunnel->frame.frame.f4.elen = ntohs(wss_tunnel->raw_len);
-                    pre = 8;
-                }
-               if (lws_write(wsi, wss_tunnel->raw_rx - pre , wss_tunnel->raw_len + pre, LWS_WRITE_RAW) < 0) {
-                    lwsl_notice("[wss] cannot write %u to remote for peer %d", wss_tunnel->raw_len,
-                                wss_tunnel->raw_port);
+                uint8_t pre = prepare_wss_data(wss_tunnel);
+                if (lws_write(wsi, wss_tunnel->raw_rx - pre, wss_tunnel->raw_len + pre, LWS_WRITE_RAW) < 0) {
+                    lwsl_notice("[wss] cannot send %u to wss for peer %d",
+                                wss_tunnel->raw_len, wss_tunnel->peer_port);
                     return -1;
                 }
-                lwsl_notice("[wss] write %u to remote for peer %d", wss_tunnel->raw_len, wss_tunnel->raw_port);
+                lwsl_notice("[wss] send %u to wss for peer %d", wss_tunnel->raw_len, wss_tunnel->peer_port);
                 wss_tunnel->raw_len = 0;
             }
             lws_rx_flow_control(lws_get_opaque_parent_data(wsi), 1);
@@ -299,22 +227,18 @@ static int callback_wss_client(struct lws *wsi, enum lws_callback_reasons reason
         case LWS_CALLBACK_CLIENT_CLOSED:
         case LWS_CALLBACK_CLIENT_CONNECTION_ERROR: {
             struct wss_tunnel *wss_tunnel = user;
-            struct lws *raw_server;
-            raw_server = lws_get_opaque_parent_data(wsi);
             if (wss_tunnel == NULL) {
-                lwsl_notice("[wss] connection closed, local tunnel is closed");
+                lwsl_notice("[wss] closed");
                 return -1;
             }
             if (wss_tunnel->raw_state == STATE_CLOSED) {
-                lwsl_notice("[wss] connection closed, and tunnel on peer %d is closed", wss_tunnel->raw_port);
+                lwsl_notice("[wss] closed for peer %d, tunnel is closed", wss_tunnel->peer_port);
                 return -1;
             }
             wss_tunnel->wss_state = STATE_CLOSED;
-            lwsl_notice("[wss] connection closed, would close tunnel on peer %d, reason: %s",
-                        wss_tunnel->raw_port, in == NULL ? "(null)" : (char *) in);
-            if (raw_server != NULL) {
-                lws_callback_on_writable(raw_server);
-            }
+            lwsl_notice("[wss] closed for peer %d, would close tunnel, reason: %s",
+                        wss_tunnel->peer_port, in == NULL ? "(null)" : (char *) in);
+            lws_callback_on_writable(lws_get_opaque_parent_data(wsi));
             break;
         }
         default:
@@ -324,43 +248,48 @@ static int callback_wss_client(struct lws *wsi, enum lws_callback_reasons reason
     return 0;
 }
 
-static uint16_t get_port(struct lws *wsi) {
-    socklen_t len;
-    struct sockaddr_storage sin, *psin = &sin;
-    lws_sockfd_type sockfd = lws_get_socket_fd(wsi);
-    if (getpeername(sockfd, (struct sockaddr *) psin, &len) != -1) {
-        return (sin.ss_family == AF_INET6) ?
-               ntohs(((struct sockaddr_in6 *) psin)->sin6_port) :
-               ntohs(((struct sockaddr_in *) psin)->sin_port);
-    } else {
-        return 0;
-    }
-}
-
 static int callback_raw_server(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len) {
     switch (reason) {
         case LWS_CALLBACK_RAW_ADOPT: {
             struct lws *wss;
-            struct wss_tunnel *wss_tunnel = user;
             struct wss_context *wss_context;
-            wss_tunnel->raw_port = get_port(wsi);
-            wss_context = lws_context_user(lws_get_context(wsi));
-            wss_context->cc_info->userdata = wss_tunnel;
-            wss = lws_client_connect_via_info(wss_context->cc_info);
-            if (wss == NULL) {
-                lwsl_warn("[client] cannot connect to remote: %d", wss_tunnel->raw_port);
+            struct wss_tunnel *wss_tunnel = user;
+            if (wss_tunnel == NULL) {
                 return -1;
             }
+            wss_tunnel->peer_port = get_port(wsi);
+            wss_context = lws_context_user(lws_get_context(wsi));
+            wss = lws_client_connect_via_info(wss_context->cc_info);
+            if (wss == NULL) {
+                lwsl_warn("[raw] new connection from peer %d, cannot connect to wss", wss_tunnel->peer_port);
+                return -1;
+            }
+            lws_set_wsi_user(wss, wss_tunnel);
             lws_set_opaque_parent_data(wsi, wss);
             lws_set_opaque_parent_data(wss, wsi);
             wss_tunnel->raw_state = STATE_ESTABLISHED;
             lws_callback_on_writable(wsi);
-            lwsl_user("[client] new connection from peer %d, count: %d", wss_tunnel->raw_port, ++wss_context->count);
+            lwsl_user("[raw] new connection from peer %d, count: %d", wss_tunnel->peer_port, ++wss_context->count);
             break;
         }
         case LWS_CALLBACK_RAW_RX: {
             struct wss_tunnel *wss_tunnel = user;
-            lwsl_notice("[client] receive %u from peer %d", (uint16_t) len, wss_tunnel->raw_port);
+            if (wss_tunnel == NULL) {
+                lwsl_notice("[raw] received %u from peer %d, however tunnel is null",
+                            (uint16_t) len, get_port(wsi));
+                return -1;
+            }
+            if (wss_tunnel->wss_state == STATE_CLOSED) {
+                lwsl_notice("[raw] received %u from peer %d, however tunnel is closed",
+                            (uint16_t) len, wss_tunnel->peer_port);
+                return -1;
+            }
+            if (len > RX_BUFFER_SIZE) {
+                lwsl_err("[raw] received %u from peer %d, however buffer is only %d",
+                         (uint16_t) len, wss_tunnel->peer_port, RX_BUFFER_SIZE);
+                return -1;
+            }
+            lwsl_notice("[raw] received %u from peer %d", (uint16_t) len, wss_tunnel->peer_port);
             memcpy(wss_tunnel->raw_rx, in, len);
             wss_tunnel->raw_len = (uint16_t) len;
             // block wsi until buf is empty
@@ -370,37 +299,46 @@ static int callback_raw_server(struct lws *wsi, enum lws_callback_reasons reason
         }
         case LWS_CALLBACK_RAW_WRITEABLE: {
             struct wss_tunnel *wss_tunnel = user;
-            if (wss_tunnel->wss_len > 0) {
-                if (lws_write(wsi, wss_tunnel->wss_rx, wss_tunnel->wss_len, LWS_WRITE_RAW) < 0) {
-                    lwsl_warn("[client] cannot write %u to peer %d", wss_tunnel->wss_len, wss_tunnel->raw_port);
-                    return -1;
-                }
-                lwsl_notice("[client] write %u to peer %d", wss_tunnel->wss_len, wss_tunnel->raw_port);
-                wss_tunnel->wss_len = 0;
+            if (wss_tunnel == NULL) {
+                lwsl_notice("[raw] wound send, however tunnel is null");
+                return -1;
             }
             if (wss_tunnel->wss_state == STATE_CLOSED) {
-                lwsl_notice("[client] remote connection is closed for client on %d", wss_tunnel->raw_port);
+                lwsl_notice("[raw] would send to peer %d, however tunnel is closed", wss_tunnel->peer_port);
                 return -1;
+            }
+            if (wss_tunnel->wss_len > 0) {
+                if (lws_write(wsi, wss_tunnel->wss_rx, wss_tunnel->wss_len, LWS_WRITE_RAW) < 0) {
+                    lwsl_warn("[raw] cannot send %u to peer %d", wss_tunnel->wss_len, wss_tunnel->peer_port);
+                    return -1;
+                }
+                lwsl_notice("[raw] send %u to peer %d", wss_tunnel->wss_len, wss_tunnel->peer_port);
+                wss_tunnel->wss_len = 0;
             }
             lws_rx_flow_control(lws_get_opaque_parent_data(wsi), 1);
             break;
         }
         case LWS_CALLBACK_RAW_CLOSE: {
-            struct wss_tunnel *wss_tunnel = user;
             struct lws *wss;
-            struct wss_context *wss_context = lws_context_user(lws_get_context(wsi));
-            --wss_context->count;
+            struct wss_tunnel *wss_tunnel = user;
+            struct wss_context *wss_context;
+            if (wss_tunnel == NULL) {
+                lwsl_notice("[raw] peer %d is closed, however tunnel is null", get_port(wsi));
+                return -1;
+            }
             wss_tunnel->raw_state = STATE_CLOSED;
             wss = lws_get_opaque_parent_data(wsi);
             lws_set_wsi_user(wss, NULL);
-            lws_set_opaque_parent_data(wss, NULL);
+            wss_context = lws_context_user(lws_get_context(wsi));
+            --wss_context->count;
+
             if (wss_tunnel->wss_state != STATE_CLOSED) {
-                lwsl_user("[client] peer %d is closed, would close wss connection, count: %d",
-                          wss_tunnel->raw_port, wss_context->count);
+                lwsl_user("[raw] peer %d is closed, would close wss, count: %d",
+                          wss_tunnel->peer_port, wss_context->count);
                 lws_callback_on_writable(wss);
             } else {
-                lwsl_user("[client] peer %d is closed, count: %d",
-                          wss_tunnel->raw_port, wss_context->count);
+                lwsl_user("[raw] peer %d is closed, count: %d",
+                          wss_tunnel->peer_port, wss_context->count);
             }
             break;
         }
@@ -411,25 +349,18 @@ static int callback_raw_server(struct lws *wsi, enum lws_callback_reasons reason
     return 0;
 }
 
-int main() {
-    const char *plugin_options;
+int main(int argc, char **argv) {
     struct lws_context *context;
     struct lws_context_creation_info info;
     const struct lws_protocols protocols[] = {
-            {"raw-server", callback_raw_server, sizeof(struct wss_tunnel), 0, 0, NULL, 0},
-            {"wss-client", callback_wss_client, 0,                         0, 0, NULL, 0},
-            {NULL,         NULL,                0,                         0, 0, NULL, 0}
+            {"raw-server", callback_raw_server, sizeof(struct wss_tunnel), RX_BUFFER_SIZE, 0, NULL, 0},
+            {"wss-client", callback_wss_client, 0,                         RX_BUFFER_SIZE, 0, NULL, 0},
+            {NULL, NULL,                        0,                         0,              0, NULL, 0}
     };
     struct wss_context context_data;
     struct lws_client_connect_info cc_info;
 
-    // loglevel
-    plugin_options = getenv("SS_PLUGIN_OPTIONS");
-    if (plugin_options != NULL && strstr(plugin_options, "loglevel=debug") != NULL) {
-        lws_set_log_level(LLL_ERR | LLL_WARN | LLL_USER | LLL_NOTICE, NULL);
-    } else {
-        lws_set_log_level(LLL_ERR | LLL_WARN | LLL_USER, NULL);
-    }
+    init_log_level(argc, argv);
 
     memset(&context_data, 0, sizeof(context_data));
     memset(&info, 0, sizeof(info));
@@ -440,6 +371,7 @@ int main() {
     info.protocols = protocols;
     info.vhost_name = "context";
     info.user = &context_data;
+    info.pt_serv_buf_size = RX_BUFFER_SIZE;
     context = lws_create_context(&info);
     if (!context) {
         lwsl_err("lws_create_context failed");
@@ -447,8 +379,7 @@ int main() {
     }
 
     memset(&cc_info, 0, sizeof(cc_info));
-    context_data.cc_info = &cc_info;
-    if (init_connect_info(&info, &cc_info)) {
+    if (init_ws_info(&info, &cc_info)) {
         return EXIT_FAILURE;
     }
     info.vhost_name = cc_info.host;
@@ -460,35 +391,26 @@ int main() {
         return 1;
     }
 
-    context_data.user_agent_length = lws_snprintf(context_data.user_agent, USER_AGENT_MAX_LENGTH,
-                                                  "wss-plugin/%s lws/%s", WSS_PLUGIN_VERSION,
-                                                  lws_get_library_version());
-
-    if (init_local_info(&info)) {
+    if (init_raw_info(&info)) {
         return EXIT_FAILURE;
     }
     // since lws 3.2.0
     info.options |= LWS_SERVER_OPTION_ADOPT_APPLY_LISTEN_ACCEPT_CONFIG;
     info.listen_accept_protocol = "raw-server";
     info.listen_accept_role = "raw-skt";
+    info.vhost_name = "raw-server";
     if (!lws_create_vhost(context, &info)) {
         lwsl_err("lws_create_vhost failed");
         return 1;
     }
 
+    context_data.cc_info = &cc_info;
+    context_data.user_agent_length = lws_snprintf(context_data.user_agent, USER_AGENT_MAX_LENGTH,
+                                                  "wss-plugin-client/%s lws/%s", WSS_PLUGIN_VERSION,
+                                                  lws_get_library_version());
     lwsl_user("%s started", context_data.user_agent);
-    signal(SIGTERM, sigterm_catch);
-    signal(SIGINT, sigterm_catch);
-    signal(SIGUSR1, sigterm_catch);
-    signal(SIGUSR2, sigterm_catch);
-    while (!interrupted) {
-        if (lws_service(context, 0) < 0) {
-            lwsl_err("lws_service failed");
-            break;
-        }
-    }
 
-    lws_context_destroy(context);
+    run(context);
 
     return 0;
 }
