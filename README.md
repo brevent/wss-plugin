@@ -2,7 +2,7 @@ SIP003 plugin for shadowsocks, based on WebSocket.
 
 ## Build
 
-### install `libwebsockets`
+### install `libwebsockets` 3.2.0+, recommend latest stable
 
 Refer [libwebsockets](https://github.com/warmcat/libwebsockets).
 
@@ -33,4 +33,22 @@ cmake --build build
 
 ### Server
 
-Not implement yet, use [v2ray-plugin](https://github.com/shadowsocks/v2ray-plugin/).
+There is unnecessary to specify `tls`, `host`, `path`:
+- `tls`, use behind nginx, plugin server doesn't support tls.
+- `host`, use behind nginx, plugin server support any host.
+- `path`, use behind nginx, plugin server support any path.
+
+```json
+{
+    "server":"127.0.0.1",
+    "server_port":3448,
+    "timeout":60,
+    "method":"none",
+    "plugin": "/path/to/wss-plugin-server",
+    "plugin_opts": "mux=0"
+}
+```
+
+### Compatible
+
+Should compatible with `mux=0` with [v2ray-plugin](https://github.com/shadowsocks/v2ray-plugin/).
