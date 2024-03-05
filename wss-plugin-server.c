@@ -291,7 +291,7 @@ int main(int argc, char **argv) {
     struct lws_context *context;
     struct lws_context_creation_info info;
     const struct lws_protocols protocols[] = {
-            {"wss-server", callback_wss_server, sizeof(struct wss_tunnel), RX_BUFFER_SIZE, 0, NULL, 0},
+            {"wss-server", callback_wss_server, sizeof(struct wss_tunnel), 0,              0, NULL, 0},
             {"raw-client", callback_raw_client, 0,                         RX_BUFFER_SIZE, 0, NULL, 0},
             {NULL, NULL,                        0,                         0,              0, NULL, 0}
     };
@@ -309,7 +309,7 @@ int main(int argc, char **argv) {
     info.protocols = protocols;
     info.vhost_name = "context";
     info.user = &context_data;
-    info.pt_serv_buf_size = RX_BUFFER_SIZE;
+    info.pt_serv_buf_size = PT_SERV_BUF_SIZE;
     context = lws_create_context(&info);
     if (!context) {
         lwsl_err("lws_create_context failed");
