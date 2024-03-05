@@ -5,7 +5,7 @@
 #include "libwebsockets.h"
 
 #ifndef WSS_PLUGIN_VERSION
-#define WSS_PLUGIN_VERSION "0.3.0-SNAPSHOT"
+#define WSS_PLUGIN_VERSION "0.3.0"
 #endif
 
 #ifndef RX_BUFFER_SIZE
