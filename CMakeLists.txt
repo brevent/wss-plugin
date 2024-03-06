@@ -13,6 +13,21 @@ if(NOT EXISTS ${LWS_LIBRARIES} OR ${LWS_LIBRARIES} MATCHES "\\.a$")
 endif()
 message("LWS_LIBRARIES: ${LWS_LIBRARIES}")
 
+find_package(Git)
+if(GIT_FOUND)
+    message("Git found: ${GIT_EXECUTABLE}")
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} describe --tags --always --dirty
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        RESULT_VARIABLE GIT_DESCRIBE_RESULT
+        OUTPUT_VARIABLE GIT_DESCRIBE_OUTPUT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if (NOT ${GIT_DESCRIBE_RESULT})
+        add_definitions(-DWSS_PLUGIN_VERSION="${GIT_DESCRIBE_OUTPUT}")
+    endif()
+endif()
+
 include(CheckFunctionExists)
 set(CMAKE_REQUIRED_LIBRARIES ${LWS_LIBRARIES})
 check_function_exists(lws_get_opcode HAVE_LWS_GET_OPCODE)

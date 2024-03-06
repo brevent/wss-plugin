@@ -22,6 +22,7 @@ static void on_signal(int signal) {
 uint16_t get_port(struct lws *wsi) {
     socklen_t len;
     struct sockaddr_storage sin;
+    len = sizeof(sin);
     if (getpeername(lws_get_socket_fd(wsi), (struct sockaddr *) &sin, &len) == -1) {
         return 0;
     }
@@ -30,6 +31,26 @@ uint16_t get_port(struct lws *wsi) {
     } else {
         return ntohs(((struct sockaddr_in *) &sin)->sin_port);
     }
+}
+
+struct lws_context *create_context(struct lws_context_creation_info *info) {
+    struct lws_context *context;
+    info->connect_timeout_secs = 10;
+    info->timeout_secs = 30;
+    info->pt_serv_buf_size = PT_SERV_BUF_SIZE;
+    info->options |= LWS_SERVER_OPTION_LIBUV;
+    if ((context = lws_create_context(info)) != NULL) {
+        lwsl_user("created context with libuv");
+        return context;
+    }
+    info->options &= (uint64_t) ~LWS_SERVER_OPTION_LIBUV;
+    info->options |= LWS_SERVER_OPTION_ULOOP;
+    if ((context = lws_create_context(info)) != NULL) {
+        lwsl_user("created context with uloop");
+        return context;
+    }
+    info->options &= (uint64_t) ~LWS_SERVER_OPTION_ULOOP;
+    return lws_create_context(info);
 }
 
 void run(struct lws_context *context) {
@@ -56,4 +77,20 @@ void init_log_level(int argc, char **argv) {
     } else {
         lws_set_log_level(LLL_ERR | LLL_WARN | LLL_USER, NULL);
     }
+}
+
+int callback_on_endpoint_writable(struct lws *wsi) {
+    return lws_callback_on_writable(lws_get_opaque_parent_data(wsi));
+}
+
+int rx_flow_control_endpoint(struct lws *wsi, int enable) {
+    return lws_rx_flow_control(lws_get_opaque_parent_data(wsi), enable);
+}
+
+int set_wsi_closing(struct lws *wsi) {
+    if (lws_get_opaque_user_data(wsi) == wsi) {
+        return 0;
+    }
+    lws_set_opaque_user_data(wsi, wsi);
+    return 1;
 }

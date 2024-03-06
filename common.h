@@ -5,7 +5,7 @@
 #include "libwebsockets.h"
 
 #ifndef WSS_PLUGIN_VERSION
-#define WSS_PLUGIN_VERSION "0.3.0"
+#define WSS_PLUGIN_VERSION "0.3.1"
 #endif
 
 #ifndef RX_BUFFER_SIZE
@@ -17,6 +17,8 @@
 enum {
     STATE_ESTABLISHED = 1,
     STATE_CLOSED,
+    STATE_ERROR,
+    STATE_CLOSING,
 };
 
 struct wss_frame_client {
@@ -69,8 +71,16 @@ struct wss_tunnel {
 
 uint16_t get_port(struct lws *wsi);
 
+struct lws_context *create_context(struct lws_context_creation_info *info);
+
 void run(struct lws_context *context);
 
 void init_log_level(int argc, char **argv);
+
+int callback_on_endpoint_writable(struct lws *wsi);
+
+int rx_flow_control_endpoint(struct lws *wsi, int enable);
+
+int set_wsi_closing(struct lws *wsi);
 
 #endif //WSS_PLUGIN_COMMON_H
