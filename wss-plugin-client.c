@@ -402,6 +402,8 @@ int main(int argc, char **argv) {
     info.protocols = protocols;
     info.vhost_name = "context";
     info.user = &context_data;
+    info.timeout_secs = 30;
+    info.pt_serv_buf_size = PT_SERV_BUF_SIZE;
     context = create_context(&info);
     if (!context) {
         lwsl_err("cannot create context");

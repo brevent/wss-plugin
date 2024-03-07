@@ -34,10 +34,8 @@ uint16_t get_port(struct lws *wsi) {
 }
 
 struct lws_context *create_context(struct lws_context_creation_info *info) {
-    struct lws_context *context;
-    info->timeout_secs = 30;
-    info->pt_serv_buf_size = PT_SERV_BUF_SIZE;
 #ifdef LWS_SERVER_OPTION_LIBUV
+    struct lws_context *context;
     info->options |= LWS_SERVER_OPTION_LIBUV;
     if ((context = lws_create_context(info)) != NULL) {
         lwsl_user("created context with libuv");
