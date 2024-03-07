@@ -162,6 +162,11 @@ static int callback_wss_client(struct lws *wsi, enum lws_callback_reasons reason
         }
         case LWS_CALLBACK_CLIENT_ESTABLISHED: {
             struct wss_tunnel *wss_tunnel = user;
+            if (lws_get_opaque_parent_data(wsi) == NULL) {
+                lwsl_warn("[wss] established, tunnel is closed");
+                lws_close_reason(wsi, LWS_CLOSE_STATUS_GOINGAWAY, NULL, 0);
+                return -1;
+            }
             if (wss_tunnel == NULL) {
                 lwsl_warn("[wss] established, tunnel is null");
                 return -1;
@@ -172,14 +177,18 @@ static int callback_wss_client(struct lws *wsi, enum lws_callback_reasons reason
             break;
         }
         case LWS_CALLBACK_CLIENT_RECEIVE: {
-            struct lws *raw;
             struct wss_tunnel *wss_tunnel = user;
+            if (lws_get_opaque_parent_data(wsi) == NULL) {
+                lwsl_warn("[wss] received, tunnel is closed");
+                lws_close_reason(wsi, LWS_CLOSE_STATUS_GOINGAWAY, NULL, 0);
+                return -1;
+            }
             if (wss_tunnel == NULL) {
                 lwsl_warn("[wss] received, tunnel is null");
                 return -1;
             }
             if (len + wss_tunnel->wss_len > RX_BUFFER_SIZE) {
-                lwsl_err("[wss] received %u from wss for peer %d, pending: %u, however buffer is only %d",
+                lwsl_err("[wss] received %u from wss for peer %d, pending: %u, buffer: %d",
                          (uint16_t) len, wss_tunnel->peer_port, wss_tunnel->wss_len, RX_BUFFER_SIZE);
                 lws_close_reason(wsi, LWS_CLOSE_STATUS_MESSAGE_TOO_LARGE, NULL, 0);
                 return -1;
@@ -189,11 +198,7 @@ static int callback_wss_client(struct lws *wsi, enum lws_callback_reasons reason
             wss_tunnel->wss_len += (uint16_t) len;
             // block wsi until buf is empty
             lws_rx_flow_control(wsi, 0);
-            if ((raw = lws_get_opaque_parent_data(wsi)) != NULL) {
-                lws_callback_on_writable(raw);
-            } else {
-                lwsl_warn("[wss] cannot make raw writable for peer %d", wss_tunnel->peer_port);
-            }
+            callback_on_endpoint_writable(wsi);
             break;
         }
         case LWS_CALLBACK_CLIENT_RECEIVE_PONG:
@@ -264,11 +269,11 @@ static int callback_raw_server(struct lws *wsi, enum lws_callback_reasons reason
             struct wss_context *wss_context;
             struct wss_tunnel *wss_tunnel = user;
             if (wss_tunnel == NULL) {
-                lwsl_warn("[raw] adopt, tunnel is null");
+                lwsl_err("[raw] adopt, tunnel is null");
                 return -1;
             }
             if (wss_tunnel->raw_state) {
-                lwsl_warn("[raw] adopt, tunnel is initialized");
+                lwsl_err("[raw] adopt, tunnel is initialized");
                 return -1;
             }
             wss_tunnel->peer_port = get_port(wsi);
@@ -288,14 +293,17 @@ static int callback_raw_server(struct lws *wsi, enum lws_callback_reasons reason
             break;
         }
         case LWS_CALLBACK_RAW_RX: {
-            struct lws *wss;
             struct wss_tunnel *wss_tunnel = user;
+            if (lws_get_opaque_parent_data(wsi) == NULL) {
+                lwsl_err("[raw] received, tunnel is closed");
+                return -1;
+            }
             if (wss_tunnel == NULL) {
-                lwsl_warn("[raw] rx, tunnel is null");
+                lwsl_err("[raw] received, tunnel is null");
                 return -1;
             }
             if (len + wss_tunnel->raw_len > RX_BUFFER_SIZE) {
-                lwsl_err("[raw] received %u from peer %d, pending: %u, however buffer is only %d",
+                lwsl_err("[raw] received %u from peer %d, pending: %u, buffer: %d",
                          (uint16_t) len, wss_tunnel->peer_port, wss_tunnel->raw_len, RX_BUFFER_SIZE);
                 return -1;
             }
@@ -304,18 +312,17 @@ static int callback_raw_server(struct lws *wsi, enum lws_callback_reasons reason
             wss_tunnel->raw_len += (uint16_t) len;
             // block wsi until buf is empty
             lws_rx_flow_control(wsi, 0);
-            if ((wss = lws_get_opaque_parent_data(wsi)) != NULL) {
-                lws_callback_on_writable(wss);
-            } else {
-                lwsl_warn("[raw] cannot make wss writable for peer %d", wss_tunnel->peer_port);
-            }
+            callback_on_endpoint_writable(wsi);
             break;
         }
         case LWS_CALLBACK_RAW_WRITEABLE: {
-            struct lws *wss;
             struct wss_tunnel *wss_tunnel = user;
+            if (lws_get_opaque_parent_data(wsi) == NULL) {
+                lwsl_err("[raw] writable, tunnel is closed");
+                return -1;
+            }
             if (wss_tunnel == NULL) {
-                lwsl_warn("[raw] writable, tunnel is null");
+                lwsl_err("[raw] writable, tunnel is null");
                 return -1;
             }
             if (wss_tunnel->raw_state == STATE_CLOSING) {
@@ -331,11 +338,7 @@ static int callback_raw_server(struct lws *wsi, enum lws_callback_reasons reason
                 }
                 lwsl_notice("[raw] send %u to peer %d", wss_tunnel->wss_len, wss_tunnel->peer_port);
                 wss_tunnel->wss_len = 0;
-                if ((wss = lws_get_opaque_parent_data(wsi)) != NULL) {
-                    lws_rx_flow_control(wss, 1);
-                } else {
-                    lwsl_warn("[raw] cannot make wss readable for peer %d", wss_tunnel->peer_port);
-                }
+                rx_flow_control_endpoint(wsi, 1);
             }
             break;
         }
@@ -371,6 +374,7 @@ static int callback_raw_server(struct lws *wsi, enum lws_callback_reasons reason
                 lws_callback_on_writable(wss);
             }
             lws_set_opaque_parent_data(wss, NULL);
+            lws_set_opaque_parent_data(wsi, NULL);
             break;
         }
         default:
