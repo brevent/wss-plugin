@@ -22,7 +22,7 @@ jobs:
     strategy:
       matrix:
         # https://github.com/actions/runner-images
-        os: [ubuntu-latest, ubuntu-20.04, macos-latest, macos-11, macos-13, macos-14-large]
+        os: [ubuntu-latest, ubuntu-20.04, macos-latest, macos-14-large]
 
     steps:
     - uses: actions/checkout@v3
